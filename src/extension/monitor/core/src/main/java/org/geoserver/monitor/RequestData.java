@@ -6,12 +6,21 @@
 package org.geoserver.monitor;
 
 import java.io.Serializable;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
-import org.geoserver.platform.ServiceException;
+import java.util.logging.Logger;
+import org.apache.commons.lang.StringUtils;
+import org.geotools.filter.text.cql2.CQLException;
+import org.geotools.filter.text.ecql.ECQL;
+import org.geotools.geometry.jts.JTS;
+import org.geotools.util.logging.Logging;
+import org.locationtech.geomesa.filter.FilterHelper;
+import org.locationtech.geomesa.filter.FilterValues;
+import org.locationtech.jts.geom.Geometry;
+import org.locationtech.jts.io.WKTWriter;
+import org.opengis.filter.Filter;
 import org.opengis.geometry.BoundingBox;
+import scala.collection.JavaConverters;
 
 /**
  * The request object, a simple java bean that gathers all the information and data that is
@@ -23,6 +32,13 @@ import org.opengis.geometry.BoundingBox;
 public class RequestData implements Serializable {
 
     private static final long serialVersionUID = 4115701065212157258L;
+
+    private static final Logger LOGGER = Logging.getLogger(MemoryMonitorDAO.class);
+
+    private static final WKTWriter WKT_WRITER = new WKTWriter();
+
+    private static final String CQL_FILTER_START_KEY = "CQL_FILTER=";
+    private static final String CQL_FILTER_END_KEY = "&";
 
     private static AtomicLong COUNTER = new AtomicLong();
 
@@ -211,6 +227,27 @@ public class RequestData implements Serializable {
 
     public void setQueryString(String queryString) {
         this.queryString = queryString;
+    }
+
+    public List<String> getQueryCentroidWkts() {
+        List<String> wkts = new ArrayList<>();
+
+        Filter filter = extractCqlFilter(queryString);
+        if (filter == null) {
+            return wkts;
+        }
+
+        List<String> attributes =
+                JavaConverters.seqAsJavaListConverter(FilterHelper.propertyNames(filter)).asJava();
+        for (String attribute : attributes) {
+            FilterValues<Geometry> values = FilterHelper.extractGeometries(filter, attribute, true);
+            List<Geometry> geoms = JavaConverters.seqAsJavaListConverter(values.values()).asJava();
+            for (Geometry geom : geoms) {
+                wkts.add(getCentroidWkt(geom));
+            }
+        }
+
+        return wkts;
     }
 
     /**
@@ -507,6 +544,14 @@ public class RequestData implements Serializable {
         this.bbox = bbox;
     }
 
+    public String getBboxCentroidWkt() {
+        if (bbox != null) {
+            return getCentroidWkt(JTS.toGeometry(bbox));
+        } else {
+            return null;
+        }
+    }
+
     public String getCacheResult() {
         return cacheResult;
     }
@@ -546,5 +591,30 @@ public class RequestData implements Serializable {
 
     public void setLabellingProcessingTime(Long labellingProcessingTime) {
         this.labellingProcessingTime = labellingProcessingTime;
+    }
+
+    private static String getCentroidWkt(Geometry geom) {
+        return WKT_WRITER.write(geom.getCentroid());
+    }
+
+    private static Filter extractCqlFilter(String queryString) {
+        int filterStartKeyIdx = StringUtils.indexOfIgnoreCase(queryString, CQL_FILTER_START_KEY);
+        if (filterStartKeyIdx < 0) {
+            return null;
+        }
+
+        int filterStartIdx = filterStartKeyIdx + CQL_FILTER_START_KEY.length();
+        String filterStart = queryString.substring(filterStartIdx);
+        int filterEndKeyIdx = filterStart.indexOf(CQL_FILTER_END_KEY);
+        int filterEndIdx = (filterEndKeyIdx < 0) ? filterStart.length() : filterEndKeyIdx;
+
+        String filterString = filterStart.substring(0, filterEndIdx);
+        try {
+            return ECQL.toFilter(filterString);
+        } catch (CQLException ex) {
+            LOGGER.warning(
+                    String.format("Failed to parse filter from CQL string: %s", filterString));
+            return null;
+        }
     }
 }
